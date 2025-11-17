@@ -80,9 +80,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env = gym.make(env_args["task"], cfg=env_cfg, render_mode=None)
     # create runner
 
-
+    env.reset()
     while simulation_app.is_running():
         with torch.inference_mode():
+
+            env.step({"robot_0":torch.zeros(1,2)})
 
             if env.unwrapped.sim._number_of_steps >= args["num_env_steps"]:
                 break

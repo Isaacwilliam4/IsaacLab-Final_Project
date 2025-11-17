@@ -14,6 +14,21 @@ from isaaclab.utils.math import subtract_frame_transforms
 from isaaclab.utils.math import quat_from_angle_axis, quat_from_euler_xyz, quat_rotate_inverse
 import random
 
+from isaacsim.core.utils.extensions import enable_extension
+enable_extension("isaacsim.asset.gen.omap")
+import omni.kit.test
+from isaacsim.asset.gen.omap.bindings import _omap
+from isaacsim.asset.gen.omap.utils import compute_coordinates, generate_image, update_location
+import numpy as np
+import matplotlib.pyplot as plt
+
+# import omni
+# import omni.kit.app
+# ext_manager = omni.kit.app.get_app().get_extension_manager()
+# ext_manager.set_extension_enabled_immediate("isaacsim.asset.get.omap", True)
+
+# from isaacsim.asset.gen.omap import _omap
+
 def get_quaternion_tuple_from_xyz(x, y, z):
     quat_tensor = quat_from_euler_xyz(torch.tensor([x]), torch.tensor([y]), torch.tensor([z])).flatten()
     return (quat_tensor[0].item(), quat_tensor[1].item(), quat_tensor[2].item(), quat_tensor[3].item())
@@ -108,8 +123,6 @@ class LeatherbackPathPlanningEnvCfg(DirectMARLEnvCfg):
     steering_max = 10
 
     goal_reward_scale = 20
-    ball_to_goal_reward_scale = 1.0
-    dist_to_ball_reward_scale = 1.0
 
 class LeatherbackPathPlanningEnv(DirectMARLEnv):
     cfg: LeatherbackPathPlanningEnvCfg
@@ -117,7 +130,7 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
     def __init__(self, cfg: LeatherbackPathPlanningEnvCfg, render_mode: str | None = None, headless: bool | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
         self.headless = headless
-        
+        self._om = _omap.acquire_omap_interface()
         self._throttle_dof_idx, _ = self.robots["robot_0"].find_joints(self.cfg.throttle_dof_name)
         self._steering_dof_idx, _ = self.robots["robot_0"].find_joints(self.cfg.steering_dof_name)
 
@@ -130,8 +143,6 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in [
-                "dist_to_ball_reward",
-                "ball_to_goal_reward",
                 "goal_reward",
             ]
         }
@@ -139,24 +150,29 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
         marker_cfg = VisualizationMarkersCfg(
             prim_path="/Visuals/myMarkers",
             markers={
-                    "goal1": sim_utils.CuboidCfg(
-                        size=(1, 3, 0.1),
-                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.0, 1.0)),
-                    ),
-                    "goal2": sim_utils.CuboidCfg(
-                        size=(1, 3, 0.1),
-                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
-                    ),
-                    "goal_to_score": sim_utils.CuboidCfg(
-                        size=(.5, .5, .5),
-                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),
-                    ),
-
+                    "target": sim_utils.SphereCfg(
+                        radius=0.05,
+                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.15, 0.65, 0.95)),
+                    )
                 },
         )
-        self.goal_area = VisualizationMarkers(marker_cfg)
-        self.goal1_pos, self.goal2_pos, self.goal1_area, self.goal2_area = self._get_goal_areas()
-        self.target_goal = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
+        self.target = VisualizationMarkers(marker_cfg)
+        context = omni.usd.get_context()
+        self._stage = context.get_stage()
+        self._physx = omni.physx.get_physx_interface()
+
+        # Create once, reuse
+        self._omap_gen = _omap.Generator(self._physx, context.get_stage_id())
+        self._omap_gen.update_settings(
+            0.1,  # cell size
+            1.0,   # occupied value
+            0.0,   # free value
+            0.5,   # unknown value
+        )
+
+        # Set up matplotlib stuff, etc.
+        plt.ion()
+        self.occupancy_plot_im = None
 
 
     def _setup_scene(self):
@@ -192,18 +208,44 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-    def _draw_goal_areas(self):
-        marker_ids0 = torch.zeros(self.num_envs, dtype=torch.int32, device=self.device)
-        marker_ids1 = torch.ones(self.num_envs, dtype=torch.int32, device=self.device)
-        marker_ids2 = 2 * torch.ones(self.num_envs, dtype=torch.int32, device=self.device)
+    def _draw(self):
+        point = self.robots["robot_0"].data.root_pos_w
+        point[:, 2] += 1
+        self.target.visualize(point)
 
-        marker_ids = torch.concat([marker_ids0, marker_ids1, marker_ids2], dim=0)
+    def _update_occupancy(self):
+        origin = self.scene.env_origins[0].clone()
+        origin[2] += self.robots["robot_0"].data.root_pos_w[0,2] 
+        
+        origin = (origin[0].item(), origin[1].item(), origin[2].item())
 
-        goal_to_score_pos = torch.where(self.target_goal.unsqueeze(1) == 0, self.goal1_pos, self.goal2_pos)
+        x = origin[0]
+        y = origin[1]
 
-        marker_locations = torch.concat([self.goal1_pos, self.goal2_pos, goal_to_score_pos], dim=0)
+        # Map a local box around the robot, say ±8m in x/y
+        min_bound = (x - 10, y - 10, 0.1)
+        max_bound = (x + 10, y + 10, 1.5)
 
-        self.goal_area.visualize(marker_locations, marker_indices=marker_ids)
+        self._omap_gen.set_transform(origin, min_bound, max_bound)
+        self._omap_gen.generate2d()
+
+        self.plot_occupancy_map(self._omap_gen)
+
+    def plot_occupancy_map(self, generator):
+        # Get grid dimensions (carb.Int3: x=width, y=height, z=depth)
+        dims = generator.get_dimensions()
+        width, height, _ = int(dims.x), int(dims.y), int(dims.z)
+
+        if self.occupancy_plot_im is None:
+            _, ax = plt.subplots(1)
+            self.occupancy_plot_im = ax.imshow(torch.zeros((height, width)), vmin=0, vmax=1, cmap='binary')
+
+        # Flattened buffer -> 2D array (height x width)
+        buf = np.array(generator.get_buffer(), dtype=np.float32)
+        grid = buf.reshape((height, width))
+
+        self.occupancy_plot_im.set_data(grid)
+        plt.pause(0.0001)
 
     def _pre_physics_step(self, actions: dict) -> None:
         self._throttle_action = actions["robot_0"][:, 0].repeat_interleave(4).reshape((-1, 4)) * self.cfg.throttle_scale
@@ -213,7 +255,6 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
         self._steering_action = actions["robot_0"][:, 1].repeat_interleave(2).reshape((-1, 2)) * self.cfg.steering_scale
         self._steering_action = torch.clamp(self._steering_action, -self.cfg.steering_max, self.cfg.steering_max)
         self._steering_state["robot_0"] = self._steering_action
-        self.ball.update(self.step_dt)
 
     def _apply_action(self) -> None:
         for robot_id in self.robots.keys():
@@ -235,74 +276,16 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
         return quat_rotate_inverse(ref_rot_w, obj_vel_w)
     
     def _get_observations(self) -> dict:
-
-        return {"robot_0": torch.zeros((self.num_envs, self.cfg.observation_space["robot_0"]))}
+        self._update_occupancy()
+        self._draw()
+        return {"robot_0": torch.zeros((self.num_envs, self.cfg.observation_spaces["robot_0"]))}
     
     def _get_rewards(self) -> dict:
-        ball_in_goal1, ball_in_goal2 = self._ball_in_goal_area()
-
-        goal_pos = torch.zeros_like(self.goal1_pos)
-
-        goal_pos[self.target_goal == 0] = self.goal1_pos[self.target_goal == 0]
-        goal_pos[self.target_goal == 1] = self.goal2_pos[self.target_goal == 1]
-
-        ball_distance_to_goal = torch.linalg.norm(self.ball.data.root_pos_w - goal_pos, dim=1)
-        ball_distance_to_goal_mapped = 1 - torch.tanh(ball_distance_to_goal / .8)
-
-        robot_distance_to_ball = torch.linalg.norm(self.robots["robot_0"].data.root_pos_w[:, :3] - self.ball.data.root_pos_w, dim=1)
-        robot_distance_to_ball_mapped = 1 - torch.tanh(robot_distance_to_ball / .8)
-        
-        goal_reward = torch.zeros(self.num_envs, device=self.device)
-        # Reward is 1 if ball is in target goal area, if in other goal area, reward is -1
-        goal_reward[ball_in_goal1 & (self.target_goal == 0)] = 1.0
-        goal_reward[ball_in_goal2 & (self.target_goal == 1)] = 1.0
-        goal_reward[ball_in_goal1 & (self.target_goal == 1)] = -1.0
-        goal_reward[ball_in_goal2 & (self.target_goal == 0)] = -1.0
-
-        rewards = {
-            "dist_to_ball_reward": robot_distance_to_ball_mapped * self.cfg.dist_to_ball_reward_scale * self.step_dt,
-            "ball_to_goal_reward": ball_distance_to_goal_mapped  * self.cfg.ball_to_goal_reward_scale * self.step_dt,
-            "goal_reward": goal_reward * self.cfg.goal_reward_scale,
-        }
-
-        rewards = {k: torch.nan_to_num(v, nan=0.0, posinf=1e6, neginf=-1e6)
-                for k, v in rewards.items()}
-
-        reward = torch.sum(torch.stack([rewards[key] for key in rewards.keys()]), dim=0)
-
-        for key in rewards.keys():
-            self._episode_sums[key] += rewards[key]
-
-        return {"robot_0": reward}
-    
-    def _get_goal_areas(self):
-        goal1_size = self.goal_area.cfg.markers['goal1'].size
-        goal1_pos = self.scene.env_origins.clone() + torch.tensor([-9.25, 0.0, 0.05], device=self.device)
-
-        goal2_size = self.goal_area.cfg.markers['goal2'].size
-        goal2_pos = self.scene.env_origins.clone() + torch.tensor([9.25, 0.0, 0.05], device=self.device)
-
-        # Extract goal area from goal post positions
-        goal1_min = goal1_pos + torch.tensor([-goal1_size[0]/2, -goal1_size[1]/2, 0], device=self.device)
-        goal1_max = goal1_pos + torch.tensor([goal1_size[0]/2, goal1_size[1]/2, 0], device=self.device)   
-        goal2_min = goal2_pos + torch.tensor([-goal2_size[0]/2, -goal2_size[1]/2, 0], device=self.device)
-        goal2_max = goal2_pos + torch.tensor([goal2_size[0]/2, goal2_size[1]/2, 0], device=self.device)
-
-        return goal1_pos, goal2_pos, (goal1_min, goal1_max), (goal2_min, goal2_max)
-    
-    def _ball_in_goal_area(self):
-        ball_pos = self.ball.data.root_pos_w[:, :2]
-        in_goal1 = torch.all((ball_pos >= self.goal1_area[0][:,:2]) & (ball_pos <= self.goal1_area[1][:,:2]), dim=1)
-        in_goal2 = torch.all((ball_pos >= self.goal2_area[0][:,:2]) & (ball_pos <= self.goal2_area[1][:,:2]), dim=1)
-        return in_goal1, in_goal2
+        return {"robot_0": torch.zeros(self.num_envs)}
 
     def _get_dones(self) -> tuple[dict, dict]:
-        ball_in_goal1, ball_in_goal2 = self._ball_in_goal_area()
-
-        ball_in_any_goal = ball_in_goal1 | ball_in_goal2
-
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        return {"robot_0": ball_in_any_goal}, {"robot_0": time_out}
+        return {"robot_0": time_out}, {"robot_0": time_out}
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None:
@@ -317,32 +300,11 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
                 self.episode_length_buf, high=int(self.max_episode_length)
             )
 
-        ball_in_goal1, ball_in_goal2 = self._ball_in_goal_area()
+        sampled_grid_pos = self._sample_positions_grid(env_ids, 1, 1, 1)
 
-        target_goals = self.target_goal[env_ids]
-
-        goals_scored = ((ball_in_goal1[env_ids] & (target_goals == 0))
-              | (ball_in_goal2[env_ids] & (target_goals == 1))).to(torch.float32).sum().item()
-        
-        percent_scored = goals_scored / len(env_ids) if len(env_ids) > 0 else 0
-
-        self.target_goal[env_ids] = torch.randint(0, 2, (len(env_ids),), device=self.device).to(torch.int32)
-
-        self._draw_goal_areas()
-
-        sampled_grid_pos = self._sample_positions_grid(env_ids, 2, 1, 1)
-
-        # Cache for convenience
         origins = self.scene.env_origins[env_ids]  # (N, 3)
 
-        # We’ll assign robots sequentially
         robot_ids = list(self.robots.keys())
-
-        ball_default_state = self.ball.data.default_root_state.clone()[env_ids]
-        ball_default_state[:, :2] = ball_default_state[:, :2] + self.scene.env_origins[env_ids][:,:2] +\
-        sampled_grid_pos[:, 1]
-        self.ball.write_root_state_to_sim(ball_default_state, env_ids)
-        self.ball.reset(env_ids)
 
         for i, robot_id in enumerate(robot_ids):
             # Reset robot internals
@@ -370,55 +332,39 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
             extras["Episode_Reward/"+key] = episodic_sum_avg
             self._episode_sums[key][env_ids] = 0.0
 
-        extras["Percent_Scored"] = percent_scored
         self.extras["log"] = dict()
         self.extras["log"].update(extras)
         extras = dict()
 
 
-    def _sample_positions_grid(self, env_ids, num_samples, min_dist=1.0, grid_spacing=1.0):
+    def _sample_positions_grid(self, env_ids, num_samples, min_dist=1.0, grid_spacing=2.0):
+        """
+        Samples well-separated 2D positions per environment using a coarse meshgrid
+        so blocks don't overlap. Super fast for large env counts.
+        """
         device = self.scene.env_origins.device
         N = len(env_ids)
 
         offsets = torch.zeros((N, num_samples, 2), device=device)
-        env_origins = self.scene.env_origins[env_ids][:, :2].clone()
+        env_origins = self.scene.env_origins[env_ids][:, :2]
 
-        _, _, goal1_area, goal2_area = self._get_goal_areas()
-        goal1_min, goal1_max = goal1_area
-        goal2_min, goal2_max = goal2_area
-
-        all_valid_points = []  # collect per-env lists
-
+        # Use grid_spacing >= min_dist to guarantee spacing
         for i in range(N):
-            xs = torch.arange(env_origins[i, 0] - 9, env_origins[i, 0] + 10,
-                            grid_spacing, device=device)
-            ys = torch.arange(env_origins[i, 1] - 4, env_origins[i, 1] + 5,
-                            grid_spacing, device=device)
+            # define grid area (tight bounds)
+            xs = torch.arange(env_origins[i, 0] - 8, env_origins[i, 0] + 8, grid_spacing, device=device)
+            ys = torch.arange(env_origins[i, 1] - 4, env_origins[i, 1] + 4, grid_spacing, device=device)
             xv, yv = torch.meshgrid(xs, ys, indexing="ij")
+
             grid_points = torch.stack([xv.flatten(), yv.flatten()], dim=-1)
 
-            # mask out goal areas
-            in_goal1 = (grid_points[:, 0] >= goal1_min[i, 0]) & (grid_points[:, 0] <= goal1_max[i, 0]) & \
-                    (grid_points[:, 1] >= goal1_min[i, 1]) & (grid_points[:, 1] <= goal1_max[i, 1])
-            in_goal2 = (grid_points[:, 0] >= goal2_min[i, 0]) & (grid_points[:, 0] <= goal2_max[i, 0]) & \
-                    (grid_points[:, 1] >= goal2_min[i, 1]) & (grid_points[:, 1] <= goal2_max[i, 1])
-            mask = ~(in_goal1 | in_goal2)
+            # randomly pick num_samples without replacement
+            perm = torch.randperm(grid_points.shape[0], device=device)
+            chosen = grid_points[perm[:num_samples]]
 
-            valid_points = grid_points[mask]
-            all_valid_points.append(valid_points)
-
-            if valid_points.shape[0] < num_samples:
-                raise ValueError(f"Not enough valid grid points outside goals for env {i}")
-
-            idx = torch.randperm(valid_points.shape[0], device=device)[:num_samples]
-            offsets[i] = valid_points[idx] - env_origins[i]
-
-        # save for visualization
-        self.valid_points = all_valid_points  
-        # self._draw_grid_markers()
+            offsets[i] = chosen - env_origins[i]
 
         return offsets
-    
+
 
     @torch.no_grad()
     def _draw_grid_markers(self):
