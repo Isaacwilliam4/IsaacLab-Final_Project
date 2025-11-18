@@ -45,7 +45,6 @@ class LeatherbackPathPlanningEnvCfg(DirectMARLEnvCfg):
 
     sim: SimulationCfg = SimulationCfg(dt=1 / 200, render_interval=decimation)
     robot_0: ArticulationCfg = LEATHERBACK_CFG.replace(prim_path="/World/envs/env_.*/Robot_0")
-    robot_0.init_state.pos = (0.0, 0.0, .5)
 
     wall_0 = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Object0",
@@ -124,10 +123,42 @@ class LeatherbackPathPlanningEnvCfg(DirectMARLEnvCfg):
 
     goal_reward_scale = 20
 
+    block_cfg = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/Block_.*",
+        spawn=sim_utils.CuboidCfg(
+            size=(0.5, 0.5, 1),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.2, 0.2)),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.0, 0.0, 0.25),  # base height above ground
+            rot=(1.0, 0.0, 0.0, 0.0)
+        ),
+    )
+
+    num_blocks = 10
+
 class LeatherbackPathPlanningEnv(DirectMARLEnv):
     cfg: LeatherbackPathPlanningEnvCfg
 
     def __init__(self, cfg: LeatherbackPathPlanningEnvCfg, render_mode: str | None = None, headless: bool | None = None, **kwargs):
+
+        offsets = self._sample_positions_grid(torch.arange(1), cfg.num_blocks + 1)
+
+        offset_idx = 0
+        for i in range(cfg.num_blocks):
+            block_id = f"block_{i}"
+            setattr(cfg, block_id, cfg.block_cfg.replace(prim_path=f"/World/envs/env_.*/{block_id}"))
+            res = offsets[0, offset_idx]
+            x,y = res[0].item(), res[1].item()
+            cfg.__dict__[block_id].init_state.pos = (x,y,0.5)
+            offset_idx += 1
+
+        robot_pos = offsets[0, -1]
+        x,y = robot_pos[0].item(), robot_pos[1].item() 
+        cfg.robot_0.init_state.pos = (x,y,0.1)
+
         super().__init__(cfg, render_mode, **kwargs)
         self.headless = headless
         self._om = _omap.acquire_omap_interface()
@@ -202,6 +233,12 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
             self.robots[f"robot_{i}"] = Articulation(self.cfg.__dict__["robot_" + str(i)])
             self.scene.articulations[f"robot_{i}"] = self.robots[f"robot_{i}"]
 
+        for i in range(self.cfg.num_blocks):
+            block_cfg = self.cfg.__dict__[f'block_{i}']
+            block = RigidObject(block_cfg)
+
+        
+
         self.scene.clone_environments(copy_from_source=False)
         self.scene.filter_collisions(global_prim_paths=[])
         # Add lighting
@@ -215,7 +252,7 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
 
     def _update_occupancy(self):
         origin = self.scene.env_origins[0].clone()
-        origin[2] += self.robots["robot_0"].data.root_pos_w[0,2] 
+        origin[2] = 0.5 
         
         origin = (origin[0].item(), origin[1].item(), origin[2].item())
 
@@ -342,11 +379,11 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
         Samples well-separated 2D positions per environment using a coarse meshgrid
         so blocks don't overlap. Super fast for large env counts.
         """
-        device = self.scene.env_origins.device
+        device = "cuda:0"
         N = len(env_ids)
 
         offsets = torch.zeros((N, num_samples, 2), device=device)
-        env_origins = self.scene.env_origins[env_ids][:, :2]
+        env_origins = torch.zeros((1,2)).to(device)
 
         # Use grid_spacing >= min_dist to guarantee spacing
         for i in range(N):
