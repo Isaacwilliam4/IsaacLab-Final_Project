@@ -13,135 +13,148 @@ import torch
 
 from isaaclab.app import AppLauncher
 import gymnasium as gym
+import threading
+import queue
+from contextlib import suppress
 
 parser = argparse.ArgumentParser(description="Train an RL agent with HARL.")
-parser.add_argument(
-    "--algorithm",
-    type=str,
-    default="happo",
-    choices=[
-        "happo",
-        "hatrpo",
-        "haa2c",
-        "haddpg",
-        "hatd3",
-        "hasac",
-        "had3qn",
-        "maddpg",
-        "matd3",
-        "mappo",
-        "happo_adv",
-    ],
-    help="Algorithm name. Choose from: happo, hatrpo, haa2c, haddpg, hatd3, hasac, had3qn, maddpg, matd3, mappo.",
-)
+
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
-parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--num_env_steps", type=int, default=None, help="RL Policy training iterations.")
-parser.add_argument("--dir", type=str, default=None, help="folder with trained models")
 parser.add_argument("--debug", action="store_true", help="whether to run in debug mode for visualization")
 
-# append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
-# parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
 
-# clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
 
-# launch omniverse app
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 from isaaclab.envs import DirectMARLEnvCfg, DirectRLEnvCfg, ManagerBasedRLEnvCfg
-
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
-algorithm = args_cli.algorithm.lower()
 agent_cfg_entry_point = f"pysim_integration_cfg_entry_point"
-
 
 import torch
 from py_sim.worlds.polygon_world import PolygonWorld
 import py_sim.plotting.plotting as pt
 import numpy as np
 import matplotlib.pyplot as plt
-from py_sim.tools.sim_types import TwoDimArray, UnicycleState
+from py_sim.tools.sim_types import TwoDimArray
 from py_sim.isaaclab.sample_planning import run_rrt_planner
+from collections import deque
 
-
-def grid_to_polygon_world(grid_tensor, cell_size=1.0, origin=(0.0, 0.0), occupied_value=1):
+def grid_to_polygon_world_big_components(
+    grid_tensor,
+    cell_size: float = 1.0,
+    origin=(0.0, 0.0),
+    occupied_value=1,
+):
     """
-    Convert a 2D occupancy grid (0/1) into a PolygonWorld with one rectangle per occupied cell.
+    Convert a 2D occupancy grid into a PolygonWorld with ONE rectangle per
+    connected obstacle region (4-connected).
 
-    grid_tensor: torch.Tensor or np.ndarray of shape (H, W)
-    cell_size: length of one cell in world units
-    origin: (x0, y0) world coordinate of grid cell (row=0, col=0)
-    occupied_value: value in grid that represents an obstacle
+    - grid_tensor: torch.Tensor or np.ndarray of shape (H, W)
+    - cell_size:  size of one cell in world units
+    - origin:     (x0, y0) world coordinate corresponding to grid (row=0, col=0)
+    - occupied_value: value in the grid treated as obstacle
     """
     # Convert to numpy if needed
     if isinstance(grid_tensor, torch.Tensor):
         grid = grid_tensor.cpu().numpy()
     else:
-        grid = grid_tensor
+        grid = np.asarray(grid_tensor)
 
     H, W = grid.shape
     x_origin, y_origin = origin
 
+    occ = (grid == occupied_value)
+
+    visited = np.zeros_like(occ, dtype=bool)
     polygons = []
 
-    # Find indices of occupied cells
-    rows, cols = np.where(grid == occupied_value)
+    neighbors = [(-1, 0), (1, 0), (0, -1), (0, 1)]
 
-    for r, c in zip(rows, cols):
-        # --- coordinate convention #1: row = y increasing downward ---
-        # If you treat row index r as vertical (y) increasing downward:
-        x0 = x_origin + c * cell_size
-        x1 = x0 + cell_size
-        y0 = y_origin + r * cell_size
-        y1 = y0 + cell_size
+    for r0 in range(H):
+        for c0 in range(W):
+            if not occ[r0, c0] or visited[r0, c0]:
+                continue
 
-        # If instead you want (row=0) at the TOP and (y) increasing UP,
-        # use this instead for y:
-        # y0 = y_origin + (H - 1 - r) * cell_size
-        # y1 = y0 + cell_size
+            # BFS/DFS to find all cells in this connected component
+            queue_ = deque()
+            queue_.append((r0, c0))
+            visited[r0, c0] = True
 
-        # 4-vertex rectangle polygon in the same format as your V1/V2/V3
-        vertices = np.array([
-            [x0, x1, x1, x0],  # x coordinates
-            [y0, y0, y1, y1],  # y coordinates
-        ])
-        polygons.append(vertices)
+            min_r = max_r = r0
+            min_c = max_c = c0
+
+            while queue_:
+                r, c = queue_.pop()
+                # update bounding box
+                if r < min_r: min_r = r
+                if r > max_r: max_r = r
+                if c < min_c: min_c = c
+                if c > max_c: max_c = c
+
+                for dr, dc in neighbors:
+                    rr, cc = r + dr, c + dc
+                    if 0 <= rr < H and 0 <= cc < W and not visited[rr, cc] and occ[rr, cc]:
+                        visited[rr, cc] = True
+                        queue_.append((rr, cc))
+
+            x0 = x_origin + min_c * cell_size
+            x1 = x_origin + (max_c + 1) * cell_size
+            y0 = y_origin + (H - 1 - max_r) * cell_size
+            y1 = y_origin + (H - min_r) * cell_size
+
+            vertices = np.array([
+                [x0, x1, x1, x0],  # x coordinates
+                [y0, y0, y1, y1],  # y coordinates
+            ])
+
+            polygons.append(vertices)
 
     return PolygonWorld(vertices=polygons)
 
-def grid_idx_to_world(pos_idx, cell_size, origin, H, flip_y=False):
-    """
-    pos_idx: tensor/array of shape (2,) with [row, col] **or** [y_idx, x_idx]
-    Returns: TwoDimArray(x_world, y_world)
-    """
-    # convert to Python floats
-    if isinstance(pos_idx, torch.Tensor):
-        pos_idx = pos_idx.cpu().numpy()
+def path_planning_loop(obs, debug):
+    y_limits = (5,15)
+    x_limits = (0,20)
+    cell_size = 0.1
+    origin = (0.0, 0.0)
 
-    r = float(pos_idx[0])  # row index
-    c = float(pos_idx[1])  # col index
+    grid = obs["grid"]
+    grid[grid == 0.5] = 0
 
-    # If you want row 0 at the TOP and y increasing UP, set flip_y=True
-    if flip_y:
-        r = H - 1 - r
+    H, W = grid.shape
 
-    x_world = origin[0] + (c + 0.5) * cell_size
-    y_world = origin[1] + (r + 0.5) * cell_size
-    return TwoDimArray(x_world, y_world)
+    # Convert start and goal from grid indices to polygon-world coordinates
+    x_start = cell_size*np.array(obs["robot_pos"])
+    x_goal  = cell_size*np.array(obs["goal"])
+    x_start = TwoDimArray(x_start[0],  (H*cell_size) - x_start[1])
+    x_goal  = TwoDimArray(x_goal[0],  (H*cell_size) - x_goal[1])
+    polygon_world = grid_to_polygon_world_big_components(grid, cell_size, origin)
+    fig, ax = plt.subplots(2, figsize=(10, 10))
+
+    if debug:
+        pt.plot_polygon_world(ax=ax[0], world=polygon_world)
+        ax[0].scatter(x_start.x, x_start.y, c="red")
+        ax[0].scatter(x_goal.x, x_goal.y, c="green")
+        ax[1].imshow(grid)
+        ax[1].scatter(*obs["robot_pos"], c="red")
+        ax[1].scatter(*obs["goal"], c="green")
+        plt.show()
+
+    return run_rrt_planner("rrt_star", x_start, x_goal, polygon_world, y_limits, x_limits, False, 100)
+
 
 @hydra_task_config(args_cli.task, agent_cfg_entry_point)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
     args = args_cli.__dict__
 
     args["env"] = "isaaclab"
-    args["algo"] = args["algorithm"]
     args["exp_name"] = "play"
 
     env_args = {}
@@ -149,66 +162,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env_args["task"] = args["task"]
     env_args["config"] = env_cfg
     env_args["headless"] = args["headless"]
-    env_args["debug"] = args["debug"]
+    debug = env_args["debug"] = args["debug"]
 
     env = gym.make(env_args["task"], cfg=env_cfg, render_mode=None)
-    # create runner
-
     env.reset()
-    # fig, ax = plt.subplots()
     path_planned = False
-
-    y_limits = (5,15)
-    x_limits = (0,20)
-
+    x_vec = y_vec = None
 
     while simulation_app.is_running():
         with torch.inference_mode():
-            actions = torch.zeros(1,2)
-            actions[:, 0] = 1
-            obs, _, _, _, _ = env.step({"robot_0":actions})
-            obs = obs["robot_0"]
-
             if not path_planned:
-                cell_size = 0.1
-                origin = (0.0, 0.0)
-
-                grid = obs["grid"]
-                grid[grid == 0.5] = 0
-
-                H, W = grid.shape
-
-                def grid_idx_to_world(pos_idx, cell_size, origin, H, flip_y=False):
-                    """
-                    pos_idx: tensor/array of shape (2,) with [row, col] **or** [y_idx, x_idx]
-                    Returns: TwoDimArray(x_world, y_world)
-                    """
-                    # convert to Python floats
-                    if isinstance(pos_idx, torch.Tensor):
-                        pos_idx = pos_idx.cpu().numpy()
-
-                    r = float(pos_idx[0])  # row index
-                    c = float(pos_idx[1])  # col index
-
-                    # If you want row 0 at the TOP and y increasing UP, set flip_y=True
-                    if flip_y:
-                        r = H - 1 - r
-
-                    x_world = origin[0] + (c + 0.5) * cell_size
-                    y_world = origin[1] + (r + 0.5) * cell_size
-                    return TwoDimArray(x_world, y_world)
-
-                # Convert start and goal from grid indices to polygon-world coordinates
-                # x_start = grid_idx_to_world(obs["robot_pos"], cell_size, origin, H, flip_y=False)
-                # x_goal  = grid_idx_to_world(obs["goal"],      cell_size, origin, H, flip_y=False)
-                x_start = TwoDimArray(1, 12)
-                x_goal  = TwoDimArray(12,12)
-
-                polygon_world = grid_to_polygon_world(grid, cell_size, origin)
-                # pt.plot_polygon_world(ax=ax, world=polygon_world)
-
-                run_rrt_planner("rrt_star", x_start, x_goal, polygon_world, y_limits, x_limits, False, 100)
-                path_planned = True
+                actions = torch.zeros(1,2)
+                obs, _, _, _, _ = env.step({"robot_0":actions})
+                obs = obs["robot_0"]
+                print("Planning Path")
+                x_vec, y_vec = path_planning_loop(obs, debug)
+                print("Path Planned")
+            else:
+                actions = torch.zeros(1,2)
+                obs, _, _, _, _ = env.step({"robot_0":actions})
 
             if env.unwrapped.sim._number_of_steps >= args["num_env_steps"]:
                 break

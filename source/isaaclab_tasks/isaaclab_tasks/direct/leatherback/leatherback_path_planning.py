@@ -56,7 +56,7 @@ class LeatherbackPathPlanningEnvCfg(DirectMARLEnvCfg):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.5, 0.5, 0.5)),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.0, 5.0, 1), rot=(1.0, 0.0, 0.0, 0.0) # Position originally was (0.0, 0, 0.61)
+            pos=(0.0, 6.0, 1), rot=(1.0, 0.0, 0.0, 0.0) # Position originally was (0.0, 0, 0.61)
         ),
     )
 
@@ -70,7 +70,7 @@ class LeatherbackPathPlanningEnvCfg(DirectMARLEnvCfg):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.5, 0.5, 0.5)),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.0, -5.0, 1), rot=(1.0, 0.0, 0.0, 0.0) # Position originally was (0.0, 0, 0.61)
+            pos=(0.0, -6.0, 1), rot=(1.0, 0.0, 0.0, 0.0) # Position originally was (0.0, 0, 0.61)
         ),
     )
 
