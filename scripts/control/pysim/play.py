@@ -155,7 +155,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # create runner
 
     env.reset()
-    fig, ax = plt.subplots()
+    # fig, ax = plt.subplots()
     path_planned = False
 
     y_limits = (5,15)
@@ -199,13 +199,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     return TwoDimArray(x_world, y_world)
 
                 # Convert start and goal from grid indices to polygon-world coordinates
-                x_start = grid_idx_to_world(obs["robot_pos"], cell_size, origin, H, flip_y=False)
-                x_goal  = grid_idx_to_world(obs["goal"],      cell_size, origin, H, flip_y=False)
+                # x_start = grid_idx_to_world(obs["robot_pos"], cell_size, origin, H, flip_y=False)
+                # x_goal  = grid_idx_to_world(obs["goal"],      cell_size, origin, H, flip_y=False)
+                x_start = TwoDimArray(1, 12)
+                x_goal  = TwoDimArray(12,12)
 
                 polygon_world = grid_to_polygon_world(grid, cell_size, origin)
-                pt.plot_polygon_world(ax=ax, world=polygon_world)
+                # pt.plot_polygon_world(ax=ax, world=polygon_world)
 
-                run_rrt_planner("rrt", x_start, x_goal, polygon_world, y_limits, x_limits, True, 1000)
+                run_rrt_planner("rrt_star", x_start, x_goal, polygon_world, y_limits, x_limits, False, 100)
                 path_planned = True
 
             if env.unwrapped.sim._number_of_steps >= args["num_env_steps"]:
