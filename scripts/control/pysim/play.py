@@ -47,6 +47,42 @@ from py_sim.tools.sim_types import TwoDimArray
 from py_sim.isaaclab.sample_planning import run_rrt_planner
 from collections import deque
 
+import matplotlib.pyplot as plt
+import numpy as np
+import py_sim.dynamics.bicycle as bike
+import py_sim.dynamics.differential_drive as diff
+import py_sim.dynamics.unicycle as uni
+import py_sim.sensors.occupancy_grid as og
+import py_sim.worlds.polygon_world as poly_world
+from matplotlib.axes import Axes
+from py_sim.dynamics.unicycle import solution_trajectory as unicycle_solution_trajectory
+from py_sim.path_planning import dwa
+from py_sim.path_planning.path_generation import create_path
+from py_sim.plotting.plot_constructor import create_plot_manifest
+from py_sim.sensors.range_bearing import RangeBearingSensor
+from py_sim.sim.generic_sim import SimParameters, start_sim
+from py_sim.sim.sim_modes import (
+    DwaFollower,
+    DwaFollowerIsaacLab,
+    NavVectorFollower,
+    SimpleSim,
+    VectorFollower,
+)
+from py_sim.tools.projections import LineCarrot
+from py_sim.tools.sim_types import (
+    ArcParams,
+    DwaParams,
+    TwoDimArray,
+    UnicycleControl,
+    UnicycleState,
+)
+from py_sim.vectorfield.vectorfields import (  # pylint: disable=unused-import
+    AvoidObstacle,
+    G2GAvoid,
+    GoToGoalField,
+    SummedField,
+)
+
 def grid_to_polygon_world_big_components(
     grid_tensor,
     cell_size: float = 1.0,
@@ -119,7 +155,7 @@ def grid_to_polygon_world_big_components(
 
     return PolygonWorld(vertices=polygons)
 
-def path_planning_loop(obs, debug):
+def get_relative_path_waypoints(obs, debug):
     y_limits = (5,15)
     x_limits = (0,20)
     cell_size = 0.1
@@ -136,9 +172,9 @@ def path_planning_loop(obs, debug):
     x_start = TwoDimArray(x_start[0],  (H*cell_size) - x_start[1])
     x_goal  = TwoDimArray(x_goal[0],  (H*cell_size) - x_goal[1])
     polygon_world = grid_to_polygon_world_big_components(grid, cell_size, origin)
-    fig, ax = plt.subplots(2, figsize=(10, 10))
 
     if debug:
+        fig, ax = plt.subplots(2, figsize=(10, 10))
         pt.plot_polygon_world(ax=ax[0], world=polygon_world)
         ax[0].scatter(x_start.x, x_start.y, c="red")
         ax[0].scatter(x_goal.x, x_goal.y, c="green")
@@ -147,8 +183,57 @@ def path_planning_loop(obs, debug):
         ax[1].scatter(*obs["goal"], c="green")
         plt.show()
 
-    return run_rrt_planner("rrt_star", x_start, x_goal, polygon_world, y_limits, x_limits, False, 100)
+    x_vec, y_vec = run_rrt_planner("rrt_star", x_start, x_goal, polygon_world, y_limits, x_limits, False, 100)
+    plan = x_vec, y_vec
 
+    return plan, polygon_world, x_start
+
+def get_dwa_sim(plan, obstacle_world, x_start, step_dt):
+    """Runs an example of the dynamic window approach with a unicycle dynamic model.
+    """
+
+    # Initialize the state and control
+    state_initial = UnicycleState(x = x_start.x, y= x_start.y, psi= 0.)
+
+    # Initialize the dwa search parameters
+    ds = 0.05
+    dwa_params = DwaParams(v_des=2.,
+                           w_max=1.,
+                           w_res=0.1,
+                           ds=ds,
+                           sf=2.,
+                           s_eps=0.1,
+                           k_v=2.,
+                           sigma=2.,
+                           classic=False,
+                           v_res=0.25)
+
+    # Create an inflated grid from the world
+    grid = og.generate_occupancy_from_polygon_world(
+        world=obstacle_world,
+        res=0.1,
+        x_lim=(0,20),
+        y_lim=(5,15))
+    inf_grid = og.inflate_obstacles(grid=grid, inflation=0.25)
+
+    line = np.array([plan[0], plan[1]])
+    carrot = LineCarrot(line=line, s_dev_max=5., s_carrot=2.)
+
+    # Create the simulation
+    params = SimParameters(initial_state=state_initial)
+    params.sim_plot_period = 0.1
+    params.sim_step = step_dt
+    params.sim_update_period = step_dt
+    sim = DwaFollowerIsaacLab(params=params,
+                      dynamics= uni.dynamics,
+                      controller=uni.arc_control,
+                      dynamic_params= uni.UnicycleParams(),
+                      dwa_params=dwa_params,
+                      n_inputs=UnicycleControl.n_inputs,
+                      world=inf_grid,
+                      carrot=carrot
+                      )
+    return sim
 
 @hydra_task_config(args_cli.task, agent_cfg_entry_point)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
@@ -167,7 +252,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env = gym.make(env_args["task"], cfg=env_cfg, render_mode=None)
     env.reset()
     path_planned = False
-    x_vec = y_vec = None
+
+    sim = None
 
     while simulation_app.is_running():
         with torch.inference_mode():
@@ -176,11 +262,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 obs, _, _, _, _ = env.step({"robot_0":actions})
                 obs = obs["robot_0"]
                 print("Planning Path")
-                x_vec, y_vec = path_planning_loop(obs, debug)
+                plan, obstacle_world, x_start = get_relative_path_waypoints(obs, debug)
+                sim = get_dwa_sim(plan, obstacle_world, x_start, env.unwrapped.step_dt)
+                path_planned = True
                 print("Path Planned")
             else:
                 actions = torch.zeros(1,2)
-                obs, _, _, _, _ = env.step({"robot_0":actions})
+                velocity, steer = sim.dwa_arc.v, sim.dwa_arc.w
+                actions[:, 0] = velocity
+                actions[:, 0] = steer
+                env.step({"robot_0":actions})
 
             if env.unwrapped.sim._number_of_steps >= args["num_env_steps"]:
                 break
