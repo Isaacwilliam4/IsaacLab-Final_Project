@@ -36,7 +36,7 @@ def get_quaternion_tuple_from_xyz(x, y, z):
 @configclass
 class LeatherbackPathPlanningEnvCfg(DirectMARLEnvCfg):
     decimation = 4
-    episode_length_s = 20.0
+    episode_length_s = 5.0
     action_spaces = {f"robot_{i}": 2 for i in range(1)}
     observation_spaces = {f"robot_{i}": 24 for i in range(1)}
     state_space = 0
@@ -144,20 +144,16 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
 
     def __init__(self, cfg: LeatherbackPathPlanningEnvCfg, render_mode: str | None = None, headless: bool | None = None, **kwargs):
 
-        offsets = self._sample_positions_grid(torch.arange(1), cfg.num_blocks + 1)
+        self.block_offsets = self._sample_positions_grid(cfg.num_blocks)
 
         offset_idx = 0
         for i in range(cfg.num_blocks):
             block_id = f"block_{i}"
             setattr(cfg, block_id, cfg.block_cfg.replace(prim_path=f"/World/envs/env_.*/{block_id}"))
-            res = offsets[0, offset_idx]
+            res = self.block_offsets[offset_idx]
             x,y = res[0].item(), res[1].item()
             cfg.__dict__[block_id].init_state.pos = (x,y,0.5)
             offset_idx += 1
-
-        robot_pos = offsets[0, -1]
-        x,y = robot_pos[0].item(), robot_pos[1].item() 
-        cfg.robot_0.init_state.pos = (x,y,0.1)
 
         super().__init__(cfg, render_mode, **kwargs)
         self.headless = headless
@@ -380,7 +376,7 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
                 self.episode_length_buf, high=int(self.max_episode_length)
             )
 
-        sampled_grid_pos = self._sample_positions_grid(env_ids, 1, 1, 1)
+        sampled_grid_pos = self._sample_positions_grid(1)
 
         origins = self.scene.env_origins[env_ids]  # (N, 3)
 
@@ -398,7 +394,7 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
 
             # Place robot
             default_root_state[:, :2] += origins[:, :2]
-            default_root_state[:, :2] += sampled_grid_pos[:, 0]
+            default_root_state[:, :2] += sampled_grid_pos
 
             # Write to sim
             self.robots[robot_id].write_root_pose_to_sim(default_root_state[:, :7], env_ids)
@@ -415,35 +411,34 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
         self.extras["log"] = dict()
         self.extras["log"].update(extras)
         extras = dict()
-
-
-    def _sample_positions_grid(self, env_ids, num_samples, min_dist=1.0, grid_spacing=2.0):
+    
+    def _sample_positions_grid(self, num_samples, grid_spacing=2.0):
         """
         Samples well-separated 2D positions per environment using a coarse meshgrid
         so blocks don't overlap. Super fast for large env counts.
         """
         device = "cuda:0"
-        N = len(env_ids)
-
-        offsets = torch.zeros((N, num_samples, 2), device=device)
-        env_origins = torch.zeros((1,2)).to(device)
 
         # Use grid_spacing >= min_dist to guarantee spacing
-        for i in range(N):
-            # define grid area (tight bounds)
-            xs = torch.arange(env_origins[i, 0] - 8, env_origins[i, 0] + 8, grid_spacing, device=device)
-            ys = torch.arange(env_origins[i, 1] - 4, env_origins[i, 1] + 4, grid_spacing, device=device)
-            xv, yv = torch.meshgrid(xs, ys, indexing="ij")
+        xs = torch.arange(-8, 8, grid_spacing, device=device)
+        ys = torch.arange(-4, 4, grid_spacing, device=device)
+        xv, yv = torch.meshgrid(xs, ys, indexing="ij")
 
-            grid_points = torch.stack([xv.flatten(), yv.flatten()], dim=-1)
+        grid_points = torch.stack([xv.flatten(), yv.flatten()], dim=-1)
+        if hasattr(self, "block_offsets"):
+            matches = (grid_points.unsqueeze(1) == self.block_offsets.unsqueeze(0)).all(dim=-1)
 
-            # randomly pick num_samples without replacement
-            perm = torch.randperm(grid_points.shape[0], device=device)
-            chosen = grid_points[perm[:num_samples]]
+            # For each row in t0, check if it matches ANY row in t1
+            exists_in_t1 = matches.any(dim=1)  # shape (128,)
 
-            offsets[i] = chosen - env_origins[i]
+            # Invert to keep only those NOT in t1
+            grid_points = grid_points[~exists_in_t1]
 
-        return offsets
+        # randomly pick num_samples without replacement
+        perm = torch.randperm(grid_points.shape[0], device=device)
+        chosen = grid_points[perm[:num_samples]]
+
+        return chosen
 
 
     @torch.no_grad()
