@@ -201,6 +201,9 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
             0.5,   # unknown value
         )
 
+        self.occ_cell_size = 0.1
+        self.occ_min_bound = None
+
         # Set up matplotlib stuff, etc.
         plt.ion()
         self.occupancy_plot_im = None
@@ -259,9 +262,12 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
         x = origin[0]
         y = origin[1]
 
-        # Map a local box around the robot, say ±8m in x/y
+        # Fixed global box around env 0
         min_bound = (x - 10, y - 10, 0.1)
         max_bound = (x + 10, y + 10, 1.5)
+
+        # remember for world->grid conversion
+        self.occ_min_bound = min_bound
 
         self._omap_gen.set_transform(origin, min_bound, max_bound)
         self._omap_gen.generate2d()
@@ -273,15 +279,52 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
         dims = generator.get_dimensions()
         width, height, _ = int(dims.x), int(dims.y), int(dims.z)
 
-        if self.occupancy_plot_im is None:
-            _, ax = plt.subplots(1)
-            self.occupancy_plot_im = ax.imshow(torch.zeros((height, width)), vmin=0, vmax=1, cmap='binary')
-
         # Flattened buffer -> 2D array (height x width)
         buf = np.array(generator.get_buffer(), dtype=np.float32)
-        grid = buf.reshape((height, width))
+        if buf.size == 0 or width == 0 or height == 0:
+            return
 
-        self.occupancy_plot_im.set_data(grid)
+        grid = buf.reshape((height, width))
+        grid = np.fliplr(grid)
+        # lazy-init figure
+        if self.occupancy_plot_im is None:
+            fig, ax = plt.subplots(1)
+            self.occupancy_ax = ax
+            self.occupancy_plot_im = ax.imshow(
+                grid,
+                vmin=0.0,
+                vmax=1.0,
+                cmap="binary",
+                origin="lower",  # IMPORTANT: y increases upward
+            )
+            # robot marker (x, y in grid coords)
+            self.robot_scatter = ax.scatter([], [], c="red", s=15)
+            ax.set_title("Global Occupancy Map")
+            ax.set_xlabel("X cells")
+            ax.set_ylabel("Y cells")
+        else:
+            self.occupancy_plot_im.set_data(grid)
+
+        # ----- update robot position overlay -----
+        if self.occ_min_bound is not None:
+            # robot world position (env 0)
+            root_pos = self.robots["robot_0"].data.root_pos_w[0].detach().cpu().numpy()
+            rx, ry = root_pos[0], root_pos[1]
+
+            min_x, min_y, _ = self.occ_min_bound
+            cell = self.occ_cell_size
+
+            gx = (rx - min_x) / cell
+            gy = (ry - min_y) / cell
+
+            # clamp to grid bounds
+            gx = np.clip(gx, 0, width  - 1)
+            gy = np.clip(gy, 0, height - 1)
+
+            self.robot_scatter.set_offsets(np.array([[gx, gy]]))
+
+        # draw
+        self.occupancy_ax.figure.canvas.draw_idle()
         plt.pause(0.0001)
 
     def _pre_physics_step(self, actions: dict) -> None:
