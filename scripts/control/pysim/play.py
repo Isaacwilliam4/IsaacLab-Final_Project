@@ -85,7 +85,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         with torch.inference_mode():
             actions = torch.zeros(1,2)
             actions[:, 0] = 1
-            env.step({"robot_0":actions})
+            obs, _, _, _, _ = env.step({"robot_0":actions})
 
             if env.unwrapped.sim._number_of_steps >= args["num_env_steps"]:
                 break

@@ -319,6 +319,9 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
 
             self.robot_scatter.set_offsets(np.array([[gx, gy]]))
 
+            self.robot_idx = [gx, gy]
+            self.grid = grid
+
         # draw
         self.occupancy_ax.figure.canvas.draw_idle()
         plt.pause(0.0001)
@@ -354,7 +357,7 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
     def _get_observations(self) -> dict:
         self._update_occupancy()
         self._draw()
-        return {"robot_0": torch.zeros((self.num_envs, self.cfg.observation_spaces["robot_0"]))}
+        return {"robot_0": {"robot_pos":self.robot_idx, "grid":self.grid, "goal":self.goal}}
     
     def _get_rewards(self) -> dict:
         return {"robot_0": torch.zeros(self.num_envs)}
@@ -376,7 +379,7 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
                 self.episode_length_buf, high=int(self.max_episode_length)
             )
 
-        sampled_grid_pos = self._sample_positions_grid(1)
+        robot_offset, self.goal = self._sample_positions_grid(2)
 
         origins = self.scene.env_origins[env_ids]  # (N, 3)
 
@@ -394,7 +397,7 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
 
             # Place robot
             default_root_state[:, :2] += origins[:, :2]
-            default_root_state[:, :2] += sampled_grid_pos
+            default_root_state[:, :2] += robot_offset
 
             # Write to sim
             self.robots[robot_id].write_root_pose_to_sim(default_root_state[:, :7], env_ids)
