@@ -68,6 +68,7 @@ import py_sim.plotting.plotting as pt
 import numpy as np
 import matplotlib.pyplot as plt
 from py_sim.tools.sim_types import TwoDimArray, UnicycleState
+from py_sim.isaaclab.sample_planning import run_rrt_planner
 
 
 def grid_to_polygon_world(grid_tensor, cell_size=1.0, origin=(0.0, 0.0), occupied_value=1):
@@ -115,6 +116,26 @@ def grid_to_polygon_world(grid_tensor, cell_size=1.0, origin=(0.0, 0.0), occupie
 
     return PolygonWorld(vertices=polygons)
 
+def grid_idx_to_world(pos_idx, cell_size, origin, H, flip_y=False):
+    """
+    pos_idx: tensor/array of shape (2,) with [row, col] **or** [y_idx, x_idx]
+    Returns: TwoDimArray(x_world, y_world)
+    """
+    # convert to Python floats
+    if isinstance(pos_idx, torch.Tensor):
+        pos_idx = pos_idx.cpu().numpy()
+
+    r = float(pos_idx[0])  # row index
+    c = float(pos_idx[1])  # col index
+
+    # If you want row 0 at the TOP and y increasing UP, set flip_y=True
+    if flip_y:
+        r = H - 1 - r
+
+    x_world = origin[0] + (c + 0.5) * cell_size
+    y_world = origin[1] + (r + 0.5) * cell_size
+    return TwoDimArray(x_world, y_world)
+
 @hydra_task_config(args_cli.task, agent_cfg_entry_point)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
     args = args_cli.__dict__
@@ -133,10 +154,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     env = gym.make(env_args["task"], cfg=env_cfg, render_mode=None)
     # create runner
 
-    fig, ax = plt.subplots()
     env.reset()
+    fig, ax = plt.subplots()
+    path_planned = False
 
-    plot_world = False
+    y_limits = (5,15)
+    x_limits = (0,20)
 
 
     while simulation_app.is_running():
@@ -146,12 +169,44 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             obs, _, _, _, _ = env.step({"robot_0":actions})
             obs = obs["robot_0"]
 
-            if not plot_world:
+            if not path_planned:
+                cell_size = 0.1
+                origin = (0.0, 0.0)
+
                 grid = obs["grid"]
                 grid[grid == 0.5] = 0
-                polygon_world = grid_to_polygon_world(grid, 0.1)
+
+                H, W = grid.shape
+
+                def grid_idx_to_world(pos_idx, cell_size, origin, H, flip_y=False):
+                    """
+                    pos_idx: tensor/array of shape (2,) with [row, col] **or** [y_idx, x_idx]
+                    Returns: TwoDimArray(x_world, y_world)
+                    """
+                    # convert to Python floats
+                    if isinstance(pos_idx, torch.Tensor):
+                        pos_idx = pos_idx.cpu().numpy()
+
+                    r = float(pos_idx[0])  # row index
+                    c = float(pos_idx[1])  # col index
+
+                    # If you want row 0 at the TOP and y increasing UP, set flip_y=True
+                    if flip_y:
+                        r = H - 1 - r
+
+                    x_world = origin[0] + (c + 0.5) * cell_size
+                    y_world = origin[1] + (r + 0.5) * cell_size
+                    return TwoDimArray(x_world, y_world)
+
+                # Convert start and goal from grid indices to polygon-world coordinates
+                x_start = grid_idx_to_world(obs["robot_pos"], cell_size, origin, H, flip_y=False)
+                x_goal  = grid_idx_to_world(obs["goal"],      cell_size, origin, H, flip_y=False)
+
+                polygon_world = grid_to_polygon_world(grid, cell_size, origin)
                 pt.plot_polygon_world(ax=ax, world=polygon_world)
-                plot_world = True
+
+                run_rrt_planner("rrt", x_start, x_goal, polygon_world, y_limits, x_limits, True, 1000)
+                path_planned = True
 
             if env.unwrapped.sim._number_of_steps >= args["num_env_steps"]:
                 break

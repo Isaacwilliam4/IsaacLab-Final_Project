@@ -268,9 +268,9 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
         self._omap_gen.set_transform(origin, min_bound, max_bound)
         self._omap_gen.generate2d()
 
-        self.plot_occupancy_map(self._omap_gen)
+        self._update_occupancy_map(self._omap_gen)
 
-    def plot_occupancy_map(self, generator):
+    def _update_occupancy_map(self, generator):
         # Get grid dimensions (carb.Int3: x=width, y=height, z=depth)
         dims = generator.get_dimensions()
         width, height, _ = int(dims.x), int(dims.y), int(dims.z)
@@ -282,29 +282,13 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
 
         grid = buf.reshape((height, width))
         grid = np.fliplr(grid)
-        # lazy-init figure
-        if self.occupancy_plot_im is None:
-            fig, ax = plt.subplots(1)
-            self.occupancy_ax = ax
-            self.occupancy_plot_im = ax.imshow(
-                grid,
-                vmin=0.0,
-                vmax=1.0,
-                cmap="binary",
-                origin="lower",  # IMPORTANT: y increases upward
-            )
-            # robot marker (x, y in grid coords)
-            self.robot_scatter = ax.scatter([], [], c="red", s=15)
-            ax.set_title("Global Occupancy Map")
-            ax.set_xlabel("X cells")
-            ax.set_ylabel("Y cells")
-        else:
-            self.occupancy_plot_im.set_data(grid)
 
         # ----- update robot position overlay -----
         if self.occ_min_bound is not None:
             # robot world position (env 0)
             root_pos = self.robots["robot_0"].data.root_pos_w[0].detach().cpu().numpy()
+            goal_pos = self.goal.detach().cpu().numpy()
+            rx_goal, ry_goal = goal_pos[0], goal_pos[1]
             rx, ry = root_pos[0], root_pos[1]
 
             min_x, min_y, _ = self.occ_min_bound
@@ -312,19 +296,17 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
 
             gx = (rx - min_x) / cell
             gy = (ry - min_y) / cell
+            gx_goal = (rx_goal - min_x) / cell
+            gy_goal = (ry_goal - min_y) / cell
 
-            # clamp to grid bounds
-            gx = np.clip(gx, 0, width  - 1)
-            gy = np.clip(gy, 0, height - 1)
+            # # clamp to grid bounds
+            # gx = np.clip(gx, 0, width  - 1)
+            # gy = np.clip(gy, 0, height - 1)
 
-            self.robot_scatter.set_offsets(np.array([[gx, gy]]))
-
+            self.goal_idx = [gx_goal, gy_goal]
             self.robot_idx = [gx, gy]
             self.grid = grid
 
-        # draw
-        self.occupancy_ax.figure.canvas.draw_idle()
-        plt.pause(0.0001)
 
     def _pre_physics_step(self, actions: dict) -> None:
         self._throttle_action = actions["robot_0"][:, 0].repeat_interleave(4).reshape((-1, 4)) * self.cfg.throttle_scale
@@ -357,7 +339,7 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
     def _get_observations(self) -> dict:
         self._update_occupancy()
         self._draw()
-        return {"robot_0": {"robot_pos":self.robot_idx, "grid":self.grid, "goal":self.goal}}
+        return {"robot_0": {"robot_pos":self.robot_idx, "grid":self.grid, "goal":self.goal_idx}}
     
     def _get_rewards(self) -> dict:
         return {"robot_0": torch.zeros(self.num_envs)}
