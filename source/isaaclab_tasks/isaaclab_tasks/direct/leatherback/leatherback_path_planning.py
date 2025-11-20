@@ -46,6 +46,7 @@ class LeatherbackPathPlanningEnvCfg(DirectMARLEnvCfg):
 
     sim: SimulationCfg = SimulationCfg(dt=1 / 200, render_interval=decimation)
     robot_0: ArticulationCfg = LEATHERBACK_CFG.replace(prim_path="/World/envs/env_.*/Robot_0")
+    robot_0.init_state.pos = (-8, -4, 0.1)
 
     wall_0 = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Object0",
@@ -127,7 +128,7 @@ class LeatherbackPathPlanningEnvCfg(DirectMARLEnvCfg):
     block_cfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Block_.*",
         spawn=sim_utils.CuboidCfg(
-            size=(0.5, 0.5, 1),
+            size=(.1, .1, .1),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
             collision_props=sim_utils.CollisionPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.2, 0.2)),
@@ -138,13 +139,15 @@ class LeatherbackPathPlanningEnvCfg(DirectMARLEnvCfg):
         ),
     )
 
-    num_blocks = 10
+    num_blocks = 15
 
 class LeatherbackPathPlanningEnv(DirectMARLEnv):
     cfg: LeatherbackPathPlanningEnvCfg
 
     def __init__(self, cfg: LeatherbackPathPlanningEnvCfg, render_mode: str | None = None, headless: bool | None = None, **kwargs):
 
+        self.invalid_points = torch.tensor([[-8,-4], [8,4]]).to("cuda:0")
+        
         self.block_offsets = self._sample_positions_grid(cfg.num_blocks)
 
         offset_idx = 0
@@ -182,10 +185,9 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
                         radius=0.2,
                         visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),
                     ),
-                    "arrow1": sim_utils.UsdFileCfg(
-                        usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
-                        scale=(0.1, 0.1, 1.0),
-                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.0, 0.0)),
+                    "path": sim_utils.CuboidCfg(
+                        size=(1, .1, .1),
+                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0)),
                     ),
                 },
         )
@@ -268,6 +270,10 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
         marker_scales.append(torch.ones(1, 3, device=device))     # sphere scale
         marker_indices.append(torch.zeros(1, device=device))      # 0 → sphere cfg
 
+        if not hasattr(self, "initial_robot_pos"):
+            self.initial_robot_pos = self.robots["robot_0"].data.root_pos_w.clone()
+
+        relative_pos = self.initial_robot_pos.clone()
         # ----------------- Arrows along path (index 1) -----------------
         if hasattr(self, "plan_waypoints") and len(self.plan_waypoints) > 1:
             for i, wp in enumerate(self.plan_waypoints):
@@ -281,8 +287,6 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
                 # put them in 3D (z=0)
                 wp_vis = torch.zeros(1, 3, device=device)
                 wp_vis[:, :2] = p0_xy  # position arrow at the start of the segment
-                wp_vis[:, 2] = 1
-                marker_pos.append(wp_vis)
 
                 # direction vector and yaw
                 delta = p1_xy - p0_xy
@@ -310,6 +314,11 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
 
                 # index 1 → arrow cfg
                 marker_indices.append(torch.ones(1, device=device))
+
+                wp_vis[:, :2] = relative_pos[:, :2] + 0.5*delta
+                marker_pos.append(wp_vis)
+                relative_pos[:, :2] += delta
+
 
         # ----------------- Stack and visualize -----------------
         marker_pos = torch.cat(marker_pos, dim=0)                  # (N, 3)
@@ -437,7 +446,7 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
                 self.episode_length_buf, high=int(self.max_episode_length)
             )
 
-        robot_offset, self.goal = self._sample_positions_grid(2)
+        self.goal = torch.tensor([8,4]).to(self.device)
 
         origins = self.scene.env_origins[env_ids]  # (N, 3)
 
@@ -455,7 +464,6 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
 
             # Place robot
             default_root_state[:, :2] += origins[:, :2]
-            default_root_state[:, :2] += robot_offset
 
             # Write to sim
             self.robots[robot_id].write_root_pose_to_sim(default_root_state[:, :7], env_ids)
@@ -486,8 +494,8 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
         xv, yv = torch.meshgrid(xs, ys, indexing="ij")
 
         grid_points = torch.stack([xv.flatten(), yv.flatten()], dim=-1)
-        if hasattr(self, "block_offsets"):
-            matches = (grid_points.unsqueeze(1) == self.block_offsets.unsqueeze(0)).all(dim=-1)
+        if hasattr(self, "invalid_points"):
+            matches = (grid_points.unsqueeze(1) == self.invalid_points.unsqueeze(0)).all(dim=-1)
 
             # For each row in t0, check if it matches ANY row in t1
             exists_in_t1 = matches.any(dim=1)  # shape (128,)

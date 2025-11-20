@@ -199,7 +199,7 @@ def get_dwa_sim(plan, obstacle_world, x_start, step_dt):
 
     # Initialize the dwa search parameters
     ds = 0.05
-    dwa_params = DwaParams(v_des=10.,
+    dwa_params = DwaParams(v_des=2.,
                            w_max=2.,
                            w_res=0.1,
                            ds=ds,
@@ -272,10 +272,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 print("Path Planned")
             else:
                 actions = torch.zeros(1,2)
-                # sim.update()
-                # velocity, steer = sim.dwa_arc.v, sim.dwa_arc.w
-                # actions[:, 0] = velocity
-                # actions[:, 1] = steer
+                sim.update()
+                velocity, steer = sim.dwa_arc.v, sim.dwa_arc.w
+                actions[:, 0] = velocity
+                actions[:, 1] = steer
                 env.step({"robot_0":actions})
 
             if env.unwrapped.sim._number_of_steps >= args["num_env_steps"]:
