@@ -61,6 +61,8 @@ from py_sim.path_planning.path_generation import create_path
 from py_sim.plotting.plot_constructor import create_plot_manifest
 from py_sim.sensors.range_bearing import RangeBearingSensor
 from py_sim.sim.generic_sim import SimParameters, start_sim
+import py_sim.dynamics.bicycle as bike
+
 from py_sim.sim.sim_modes import (
     DwaFollower,
     DwaFollowerIsaacLab,
@@ -169,8 +171,8 @@ def get_relative_path_waypoints(obs, debug):
     # Convert start and goal from grid indices to polygon-world coordinates
     x_start = cell_size*np.array(obs["robot_pos"])
     x_goal  = cell_size*np.array(obs["goal"])
-    x_start = TwoDimArray(x_start[0],  (H*cell_size) - x_start[1])
-    x_goal  = TwoDimArray(x_goal[0],  (H*cell_size) - x_goal[1])
+    x_start = TwoDimArray(x_start[0],  x_start[1])
+    x_goal  = TwoDimArray(x_goal[0],  x_goal[1])
     polygon_world = grid_to_polygon_world_big_components(grid, cell_size, origin)
 
     if debug:
@@ -179,9 +181,9 @@ def get_relative_path_waypoints(obs, debug):
         ax[0].scatter(x_start.x, x_start.y, c="red")
         ax[0].scatter(x_goal.x, x_goal.y, c="green")
         ax[1].imshow(grid)
-        ax[1].scatter(*obs["robot_pos"], c="red")
-        ax[1].scatter(*obs["goal"], c="green")
-        plt.show()
+        ax[1].scatter(obs["robot_pos"][0], H - obs["robot_pos"][1], c="red")
+        ax[1].scatter(obs["goal"][0], H - obs["goal"][1], c="green")
+        plt.pause(0.001)
 
     x_vec, y_vec = run_rrt_planner("rrt_star", x_start, x_goal, polygon_world, y_limits, x_limits, False, 100)
     plan = x_vec, y_vec
@@ -197,8 +199,8 @@ def get_dwa_sim(plan, obstacle_world, x_start, step_dt):
 
     # Initialize the dwa search parameters
     ds = 0.05
-    dwa_params = DwaParams(v_des=2.,
-                           w_max=1.,
+    dwa_params = DwaParams(v_des=10.,
+                           w_max=2.,
                            w_res=0.1,
                            ds=ds,
                            sf=2.,
@@ -214,7 +216,7 @@ def get_dwa_sim(plan, obstacle_world, x_start, step_dt):
         res=0.1,
         x_lim=(0,20),
         y_lim=(5,15))
-    inf_grid = og.inflate_obstacles(grid=grid, inflation=0.25)
+    inf_grid = og.inflate_obstacles(grid=grid, inflation=0.1)
 
     line = np.array([plan[0], plan[1]])
     carrot = LineCarrot(line=line, s_dev_max=5., s_carrot=2.)
@@ -225,9 +227,9 @@ def get_dwa_sim(plan, obstacle_world, x_start, step_dt):
     params.sim_step = step_dt
     params.sim_update_period = step_dt
     sim = DwaFollowerIsaacLab(params=params,
-                      dynamics= uni.dynamics,
-                      controller=uni.arc_control,
-                      dynamic_params= uni.UnicycleParams(),
+                      dynamics= bike.dynamics,
+                      controller=bike.arc_control,
+                      dynamic_params= bike.BicycleParams(L=0.4),
                       dwa_params=dwa_params,
                       n_inputs=UnicycleControl.n_inputs,
                       world=inf_grid,
@@ -265,12 +267,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 plan, obstacle_world, x_start = get_relative_path_waypoints(obs, debug)
                 sim = get_dwa_sim(plan, obstacle_world, x_start, env.unwrapped.step_dt)
                 path_planned = True
+                waypoints = np.array([(x,y) for x,y in zip(plan[0], plan[1])])
+                env.unwrapped.plan_waypoints = waypoints
                 print("Path Planned")
             else:
                 actions = torch.zeros(1,2)
-                velocity, steer = sim.dwa_arc.v, sim.dwa_arc.w
-                actions[:, 0] = velocity
-                actions[:, 0] = steer
+                # sim.update()
+                # velocity, steer = sim.dwa_arc.v, sim.dwa_arc.w
+                # actions[:, 0] = velocity
+                # actions[:, 1] = steer
                 env.step({"robot_0":actions})
 
             if env.unwrapped.sim._number_of_steps >= args["num_env_steps"]:

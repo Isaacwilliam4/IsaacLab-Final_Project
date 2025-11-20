@@ -13,6 +13,7 @@ from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.utils.math import subtract_frame_transforms
 from isaaclab.utils.math import quat_from_angle_axis, quat_from_euler_xyz, quat_rotate_inverse
 import random
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
 from isaacsim.core.utils.extensions import enable_extension
 enable_extension("isaacsim.asset.gen.omap")
@@ -36,7 +37,7 @@ def get_quaternion_tuple_from_xyz(x, y, z):
 @configclass
 class LeatherbackPathPlanningEnvCfg(DirectMARLEnvCfg):
     decimation = 4
-    episode_length_s = 5.0
+    episode_length_s = 100.0
     action_spaces = {f"robot_{i}": 2 for i in range(1)}
     observation_spaces = {f"robot_{i}": 24 for i in range(1)}
     state_space = 0
@@ -178,9 +179,14 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
             prim_path="/Visuals/myMarkers",
             markers={
                     "target": sim_utils.SphereCfg(
-                        radius=0.05,
-                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.15, 0.65, 0.95)),
-                    )
+                        radius=0.2,
+                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 1.0, 0.0)),
+                    ),
+                    "arrow1": sim_utils.UsdFileCfg(
+                        usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
+                        scale=(0.1, 0.1, 1.0),
+                        visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.0, 0.0)),
+                    ),
                 },
         )
         self.target = VisualizationMarkers(marker_cfg)
@@ -245,9 +251,78 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _draw(self):
-        point = self.robots["robot_0"].data.root_pos_w
-        point[:, 2] += 1
-        self.target.visualize(point)
+        marker_pos = []
+        marker_orientation = []
+        marker_scales = []
+        marker_indices = []
+
+        device = self.goal.device if isinstance(self.goal, torch.Tensor) else "cpu"
+
+        # ----------------- Goal sphere (index 0) -----------------
+        goal_vis = torch.zeros(1, 3, device=device)
+        goal_vis[:, :2] = self.goal.clone().to(device)
+        marker_pos.append(goal_vis)
+
+        # identity quaternion in xyzw: (0,0,0,1)
+        marker_orientation.append(torch.tensor([[0.0, 0.0, 0.0, 1.0]], device=device))
+        marker_scales.append(torch.ones(1, 3, device=device))     # sphere scale
+        marker_indices.append(torch.zeros(1, device=device))      # 0 → sphere cfg
+
+        # ----------------- Arrows along path (index 1) -----------------
+        if hasattr(self, "plan_waypoints") and len(self.plan_waypoints) > 1:
+            for i, wp in enumerate(self.plan_waypoints):
+                if i == len(self.plan_waypoints) - 1:
+                    break  # no segment from last waypoint
+
+                # current and next waypoint (2D)
+                p0_xy = torch.from_numpy(self.plan_waypoints[i]).float().to(device)
+                p1_xy = torch.from_numpy(self.plan_waypoints[i + 1]).float().to(device)
+
+                # put them in 3D (z=0)
+                wp_vis = torch.zeros(1, 3, device=device)
+                wp_vis[:, :2] = p0_xy  # position arrow at the start of the segment
+                wp_vis[:, 2] = 1
+                marker_pos.append(wp_vis)
+
+                # direction vector and yaw
+                delta = p1_xy - p0_xy
+                dx, dy = delta[0], delta[1]
+                yaw = torch.atan2(dy, dx)  # angle around z
+
+                # build quaternion from (roll=0, pitch=0, yaw=yaw)
+                # using your helper: get_quaternion_tuple_from_xyz(roll, pitch, yaw)
+                roll = torch.tensor(0.0, device=device)
+                pitch = torch.tensor(0.0, device=device)
+                quat_tuple = get_quaternion_tuple_from_xyz(roll, pitch, yaw)
+
+                # quat_tuple is expected to be (x, y, z, w)
+                orientation = torch.tensor(
+                    [[quat_tuple[0], quat_tuple[1], quat_tuple[2], quat_tuple[3]]],
+                    device=device,
+                )
+                marker_orientation.append(orientation)
+
+                # arrow length = segment length (scale X), keep Y,Z small
+                seg_len = torch.norm(delta)
+                marker_scales.append(
+                    torch.tensor([[seg_len.item(), 1, 1]], device=device)
+                )
+
+                # index 1 → arrow cfg
+                marker_indices.append(torch.ones(1, device=device))
+
+        # ----------------- Stack and visualize -----------------
+        marker_pos = torch.cat(marker_pos, dim=0)                  # (N, 3)
+        marker_orientations = torch.cat(marker_orientation, dim=0) # (N, 4)
+        marker_scales = torch.cat(marker_scales, dim=0)            # (N, 3)
+        marker_indices = torch.cat(marker_indices, dim=0).long()   # (N,)
+
+        self.target.visualize(
+            marker_pos,
+            marker_orientations,
+            scales=marker_scales,
+            marker_indices=marker_indices,
+        )
 
     def _update_occupancy(self):
         origin = self.scene.env_origins[0].clone()
@@ -282,6 +357,7 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
 
         grid = buf.reshape((height, width))
         grid = np.fliplr(grid)
+        grid = np.flipud(grid)
 
         # ----- update robot position overlay -----
         if self.occ_min_bound is not None:
