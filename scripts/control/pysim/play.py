@@ -256,6 +256,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     path_planned = False
 
     sim = None
+    poly_world_robot_pos = None
 
     while simulation_app.is_running():
         with torch.inference_mode():
@@ -273,6 +274,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             else:
                 actions = torch.zeros(1,2)
                 sim.update()
+                env.unwrapped.carrot = sim.carrot
                 velocity, steer = sim.dwa_arc.v, sim.dwa_arc.w
                 actions[:, 0] = velocity
                 actions[:, 1] = steer

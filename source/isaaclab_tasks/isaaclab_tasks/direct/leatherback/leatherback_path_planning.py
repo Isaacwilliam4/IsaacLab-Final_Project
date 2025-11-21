@@ -44,7 +44,7 @@ class LeatherbackPathPlanningEnvCfg(DirectMARLEnvCfg):
     state_spaces = {f"robot_{i}": 0 for i in range(1)}
     possible_agents = ["robot_0"]
 
-    sim: SimulationCfg = SimulationCfg(dt=1 / 200, render_interval=decimation)
+    sim: SimulationCfg = SimulationCfg(dt=1 / 200, render_interval=decimation, device="cpu")
     robot_0: ArticulationCfg = LEATHERBACK_CFG.replace(prim_path="/World/envs/env_.*/Robot_0")
     robot_0.init_state.pos = (-8, -4, 0.1)
 
@@ -124,17 +124,18 @@ class LeatherbackPathPlanningEnvCfg(DirectMARLEnvCfg):
     steering_max = 10
 
     goal_reward_scale = 20
+    block_size = .75
 
     block_cfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Block_.*",
         spawn=sim_utils.CuboidCfg(
-            size=(.1, .1, .1),
+            size=(block_size, block_size, block_size),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
             collision_props=sim_utils.CollisionPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.2, 0.2)),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.25),  # base height above ground
+            pos=(0.0, 0.0, block_size / 2),  # base height above ground
             rot=(1.0, 0.0, 0.0, 0.0)
         ),
     )
