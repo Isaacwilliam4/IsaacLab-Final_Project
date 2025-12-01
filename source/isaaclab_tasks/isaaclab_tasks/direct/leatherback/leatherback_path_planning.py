@@ -118,9 +118,9 @@ class LeatherbackPathPlanningEnvCfg(DirectMARLEnvCfg):
     env_spacing = 30.0
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=env_spacing, replicate_physics=True)
 
-    throttle_scale = 10
+    throttle_scale = 1
     throttle_max = 50
-    steering_scale = 0.1
+    steering_scale = 1
     steering_max = 10
 
     goal_reward_scale = 20
@@ -135,7 +135,7 @@ class LeatherbackPathPlanningEnvCfg(DirectMARLEnvCfg):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.8, 0.2, 0.2)),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.0, 0.0, block_size / 2),  # base height above ground
+            pos=(0.0, 0.0, block_size / 2),
             rot=(1.0, 0.0, 0.0, 0.0)
         ),
     )
@@ -157,7 +157,7 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
             setattr(cfg, block_id, cfg.block_cfg.replace(prim_path=f"/World/envs/env_.*/{block_id}"))
             res = self.block_offsets[offset_idx]
             x,y = res[0].item(), res[1].item()
-            cfg.__dict__[block_id].init_state.pos = (x,y,0.5)
+            cfg.__dict__[block_id].init_state.pos = (x,y,cfg.block_cfg.init_state.pos[2])
             offset_idx += 1
 
         super().__init__(cfg, render_mode, **kwargs)
@@ -274,8 +274,6 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
         if not hasattr(self, "initial_robot_pos"):
             self.initial_robot_pos = self.robots["robot_0"].data.root_pos_w.clone()
 
-        relative_pos = self.initial_robot_pos.clone()
-        # ----------------- Arrows along path (index 1) -----------------
         if hasattr(self, "plan_waypoints") and len(self.plan_waypoints) > 1:
             for i, wp in enumerate(self.plan_waypoints):
                 if i == len(self.plan_waypoints) - 1:
@@ -316,10 +314,8 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
                 # index 1 → arrow cfg
                 marker_indices.append(torch.ones(1, device=device))
 
-                wp_vis[:, :2] = relative_pos[:, :2] + 0.5*delta
+                wp_vis[:, :2] += 0.5*delta
                 marker_pos.append(wp_vis)
-                relative_pos[:, :2] += delta
-
 
         # ----------------- Stack and visualize -----------------
         marker_pos = torch.cat(marker_pos, dim=0)                  # (N, 3)
@@ -333,6 +329,17 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
             scales=marker_scales,
             marker_indices=marker_indices,
         )
+
+    def idx_to_world(ix: float, iy: float, *, cell: float, min_x: float, min_y: float, H: int):
+        x = min_x + ix * cell
+        # flip row index because image rows go down, world y goes up
+        y = min_y + (H - 1 - iy) * cell
+        return x, y
+    
+    def world_to_idx(x: float, y: float, *, cell: float, min_x: float, min_y: float, H: int):
+        ix = (x - min_x) / cell
+        iy = (H - 1) - (y - min_y) / cell
+        return ix, iy
 
     def _update_occupancy(self):
         origin = self.scene.env_origins[0].clone()
@@ -369,29 +376,28 @@ class LeatherbackPathPlanningEnv(DirectMARLEnv):
         grid = np.fliplr(grid)
         grid = np.flipud(grid)
 
-        # ----- update robot position overlay -----
-        if self.occ_min_bound is not None:
-            # robot world position (env 0)
-            root_pos = self.robots["robot_0"].data.root_pos_w[0].detach().cpu().numpy()
-            goal_pos = self.goal.detach().cpu().numpy()
-            rx_goal, ry_goal = goal_pos[0], goal_pos[1]
-            rx, ry = root_pos[0], root_pos[1]
+        self.grid = grid
 
-            min_x, min_y, _ = self.occ_min_bound
-            cell = self.occ_cell_size
+        H, W = grid.shape
+        cell = self.occ_cell_size
+        min_x, min_y, _ = self.occ_min_bound
 
-            gx = (rx - min_x) / cell
-            gy = (ry - min_y) / cell
-            gx_goal = (rx_goal - min_x) / cell
-            gy_goal = (ry_goal - min_y) / cell
+        robot_pos = self.robots["robot_0"].data.root_pos_w[0]  # (x,y,z)
+        goal_pos  = self.goal
 
-            # # clamp to grid bounds
-            # gx = np.clip(gx, 0, width  - 1)
-            # gy = np.clip(gy, 0, height - 1)
+        rx, ry = float(robot_pos[0]), float(robot_pos[1])
+        gx, gy = float(goal_pos[0]), float(goal_pos[1])
 
-            self.goal_idx = [gx_goal, gy_goal]
-            self.robot_idx = [gx, gy]
-            self.grid = grid
+        def world_to_idx(x, y):
+            ix = (x - min_x) / cell
+            iy = (H - 1) - (y - min_y) / cell
+            return ix, iy
+
+        robot_ix, robot_iy = world_to_idx(rx, ry)
+        goal_ix, goal_iy   = world_to_idx(gx, gy)
+
+        self.robot_idx = [robot_ix, robot_iy]
+        self.goal_idx  = [goal_ix, goal_iy]
 
 
     def _pre_physics_step(self, actions: dict) -> None:

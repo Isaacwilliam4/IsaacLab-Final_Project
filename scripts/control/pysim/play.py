@@ -62,6 +62,7 @@ from py_sim.plotting.plot_constructor import create_plot_manifest
 from py_sim.sensors.range_bearing import RangeBearingSensor
 from py_sim.sim.generic_sim import SimParameters, start_sim
 import py_sim.dynamics.bicycle as bike
+from isaaclab.utils.math import euler_xyz_from_quat
 
 from py_sim.sim.sim_modes import (
     DwaFollower,
@@ -151,43 +152,76 @@ def grid_to_polygon_world_big_components(
             vertices = np.array([
                 [x0, x1, x1, x0],  # x coordinates
                 [y0, y0, y1, y1],  # y coordinates
-            ])
+            ]) - 10
 
             polygons.append(vertices)
 
     return PolygonWorld(vertices=polygons)
 
-def get_relative_path_waypoints(obs, debug):
-    y_limits = (5,15)
-    x_limits = (0,20)
-    cell_size = 0.1
-    origin = (0.0, 0.0)
-
-    grid = obs["grid"]
-    grid[grid == 0.5] = 0
+def get_relative_path_waypoints(obs, debug: bool, cell_size: float = 0.01):
+    grid = obs["grid"].copy()
+    grid[grid == 0.5] = 0 
 
     H, W = grid.shape
 
-    # Convert start and goal from grid indices to polygon-world coordinates
-    x_start = cell_size*np.array(obs["robot_pos"])
-    x_goal  = cell_size*np.array(obs["goal"])
-    x_start = TwoDimArray(x_start[0],  x_start[1])
-    x_goal  = TwoDimArray(x_goal[0],  x_goal[1])
-    polygon_world = grid_to_polygon_world_big_components(grid, cell_size, origin)
+    robot_ix, robot_iy = obs["robot_pos"]
+    goal_ix, goal_iy   = obs["goal"]
+
+    def idx_to_world_centered(ix, iy):
+        x = (ix - (W - 1) / 2.0) * cell_size
+        y = ((H - 1) / 2.0 - iy) * cell_size
+        return x, y
+
+    # start/goal in world coords centered at (0,0)
+    x_start_xy = idx_to_world_centered(robot_ix, robot_iy)
+    x_goal_xy  = idx_to_world_centered(goal_ix,   goal_iy)
+
+    x_start = TwoDimArray(x_start_xy[0], x_start_xy[1])
+    x_goal  = TwoDimArray(x_goal_xy[0],  x_goal_xy[1])
+
+    # Build PolygonWorld in the same centered frame
+    # origin is the bottom-left corner in that same frame:
+    x_min = -(W - 1) / 2.0 * cell_size
+    y_min = -(H - 1) / 2.0 * cell_size
+
+    polygon_world = grid_to_polygon_world_big_components(
+        grid,
+        cell_size
+    )
+
+    # limits directly from grid size
+    x_limits = (x_min, x_min + W * cell_size)
+    y_limits = (y_min, y_min + H * cell_size)
 
     if debug:
         fig, ax = plt.subplots(2, figsize=(10, 10))
+
+        # world-frame plot (centered at 0,0)
         pt.plot_polygon_world(ax=ax[0], world=polygon_world)
         ax[0].scatter(x_start.x, x_start.y, c="red")
-        ax[0].scatter(x_goal.x, x_goal.y, c="green")
+        ax[0].scatter(x_goal.x,  x_goal.y,  c="green")
+        ax[0].axhline(0, color="k", linestyle="--")
+        ax[0].axvline(0, color="k", linestyle="--")
+        ax[0].set_title("PolygonWorld (centered at 0,0)")
+
+        # grid-frame debug (indices)
         ax[1].imshow(grid)
-        ax[1].scatter(obs["robot_pos"][0], H - obs["robot_pos"][1], c="red")
-        ax[1].scatter(obs["goal"][0], H - obs["goal"][1], c="green")
+        ax[1].scatter(robot_ix, robot_iy, c="red")
+        ax[1].scatter(goal_ix,  goal_iy,  c="green")
+        ax[1].set_title("Grid indices")
         plt.pause(0.001)
 
-    x_vec, y_vec = run_rrt_planner("rrt_star", x_start, x_goal, polygon_world, y_limits, x_limits, False, 100)
-    plan = x_vec, y_vec
-
+    x_vec, y_vec = run_rrt_planner(
+        "rrt_star",
+        x_start,
+        x_goal,
+        polygon_world,
+        y_limits,
+        x_limits,
+        False,
+        100,
+    )
+    plan = (x_vec, y_vec)
     return plan, polygon_world, x_start
 
 def get_dwa_sim(plan, obstacle_world, x_start, step_dt):
@@ -237,8 +271,30 @@ def get_dwa_sim(plan, obstacle_world, x_start, step_dt):
                       )
     return sim
 
+def sync_sim_state_from_env(sim, env):
+    # assume single env, robot_0
+    root_state = env.unwrapped.robots["robot_0"].data.root_state_w[0]  # (x,y,z,qx,qy,qz,qw,...)
+    pos = root_state[:3]
+    quat = root_state[3:7].unsqueeze(0)  # shape (1,4) for euler_xyz_from_quat
+
+    _, _, yaw = euler_xyz_from_quat(quat)  # (1,3); yaw is z rotation
+    yaw = yaw.item()
+
+    # This will depend on how your BicycleState/UnicycleState is defined,
+    # but usually you have both scalar fields AND a stacked 'state' vector
+    s = sim.data.current.state
+    s.x = float(pos[0].item())
+    s.y = float(pos[1].item())
+    s.psi = yaw
+
+    # keep the internal state vector consistent if it exists
+    if hasattr(s, "state"):
+        # usually it's a 3x1 vector [x, y, psi]^T
+        s.state[...] = np.array([[s.x], [s.y], [s.psi]])
+
 @hydra_task_config(args_cli.task, agent_cfg_entry_point)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
+    CELL_SIZE = 0.1
     args = args_cli.__dict__
 
     args["env"] = "isaaclab"
@@ -265,7 +321,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 obs, _, _, _, _ = env.step({"robot_0":actions})
                 obs = obs["robot_0"]
                 print("Planning Path")
-                plan, obstacle_world, x_start = get_relative_path_waypoints(obs, debug)
+                plan, obstacle_world, x_start = get_relative_path_waypoints(obs, debug, CELL_SIZE)
                 sim = get_dwa_sim(plan, obstacle_world, x_start, env.unwrapped.step_dt)
                 path_planned = True
                 waypoints = np.array([(x,y) for x,y in zip(plan[0], plan[1])])
@@ -273,8 +329,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 print("Path Planned")
             else:
                 actions = torch.zeros(1,2)
+                sync_sim_state_from_env(sim, env)
                 sim.update()
-                env.unwrapped.carrot = sim.carrot
                 velocity, steer = sim.dwa_arc.v, sim.dwa_arc.w
                 actions[:, 0] = velocity
                 actions[:, 1] = steer
