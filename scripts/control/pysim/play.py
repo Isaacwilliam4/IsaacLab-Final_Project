@@ -23,6 +23,7 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--num_env_steps", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument("--debug", action="store_true", help="whether to run in debug mode for visualization")
+from py_sim.sim.generic_sim import SimParameters, start_sim
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
@@ -158,7 +159,7 @@ def grid_to_polygon_world_big_components(
 
     return PolygonWorld(vertices=polygons)
 
-def get_relative_path_waypoints(obs, debug: bool, cell_size: float = 0.01):
+def get_path_waypoints(obs, debug: bool, cell_size: float = 0.01):
     grid = obs["grid"].copy()
     grid[grid == 0.5] = 0 
 
@@ -211,7 +212,7 @@ def get_relative_path_waypoints(obs, debug: bool, cell_size: float = 0.01):
         ax[1].set_title("Grid indices")
         plt.pause(0.001)
 
-    x_vec, y_vec = run_rrt_planner(
+    x_vec, y_vec, plot_manifest = run_rrt_planner(
         "rrt_star",
         x_start,
         x_goal,
@@ -219,12 +220,12 @@ def get_relative_path_waypoints(obs, debug: bool, cell_size: float = 0.01):
         y_limits,
         x_limits,
         False,
-        100,
+        1000,
     )
     plan = (x_vec, y_vec)
-    return plan, polygon_world, x_start
+    return plan, polygon_world, x_start, plot_manifest
 
-def get_dwa_sim(plan, obstacle_world, x_start, step_dt):
+def get_dwa_sim(plan, obstacle_world, plot_manifest, x_start, step_dt):
     """Runs an example of the dynamic window approach with a unicycle dynamic model.
     """
 
@@ -261,6 +262,7 @@ def get_dwa_sim(plan, obstacle_world, x_start, step_dt):
     params.sim_step = step_dt
     params.sim_update_period = step_dt
     sim = DwaFollowerIsaacLab(params=params,
+                              plots=plot_manifest,
                       dynamics= bike.dynamics,
                       controller=bike.arc_control,
                       dynamic_params= bike.BicycleParams(L=0.4),
@@ -321,8 +323,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 obs, _, _, _, _ = env.step({"robot_0":actions})
                 obs = obs["robot_0"]
                 print("Planning Path")
-                plan, obstacle_world, x_start = get_relative_path_waypoints(obs, debug, CELL_SIZE)
-                sim = get_dwa_sim(plan, obstacle_world, x_start, env.unwrapped.step_dt)
+                plan, obstacle_world, x_start, plot_manifest = get_path_waypoints(obs, debug, CELL_SIZE)
+                sim = get_dwa_sim(plan, obstacle_world, plot_manifest, x_start, env.unwrapped.step_dt)
+                start_sim(sim)
                 path_planned = True
                 waypoints = np.array([(x,y) for x,y in zip(plan[0], plan[1])])
                 env.unwrapped.plan_waypoints = waypoints
@@ -331,6 +334,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 actions = torch.zeros(1,2)
                 sync_sim_state_from_env(sim, env)
                 sim.update()
+                # sim.update_plot()
                 velocity, steer = sim.dwa_arc.v, sim.dwa_arc.w
                 actions[:, 0] = velocity
                 actions[:, 1] = steer
