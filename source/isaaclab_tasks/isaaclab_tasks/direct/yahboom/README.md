@@ -93,7 +93,7 @@ As observation the robot recieves a reduced size 40x40 depth camera.
 
 The reward function is defined in `yahboom_high_velocity.py` on line 240.
 
-```
+```python
 def _get_rewards(self) -> dict:
     robot_vel = torch.abs(self.robots["robot_0"].data.root_lin_vel_b[:,0]) * self.step_dt
     robot_vel = torch.nan_to_num(robot_vel, nan=0.0, posinf=1e6, neginf=-1e6)
@@ -109,4 +109,14 @@ It is simply the relative velocity of the robot in the X direction. So that it g
 
 ## Video
 
-<iframe width="560" height="315" src="https://usu.box.com/s/cfghv7194ne74flzbe8640b8f4flyoyd" frameborder="0" allowfullscreen></iframe>
+[![Video: My Demo](https://img.youtube.com/vi/tQhDa2wzx7I/hqdefault.jpg)](https://youtu.be/tQhDa2wzx7I)
+
+In the video you can see the robot observation (left) and it successfully traversing the environment while avoiding obstacles (right). 
+
+## Parameter Rationale
+
+First, I use the HAPPO training environment as recent research required its integration with Isaaclab, allowing for easier development and iteration. The motivation of the project was to demonstrate that reinforcement learning could be used to successfully navigate through the environment while avoiding obstacles with a simple depth camera. Since these models are relatively small (~900kb), they can be run in real time on a cpu and severely reduce the amount of computation necessary for environment navigation for a robot. Typically, fairly computationally expensive software navigation stacks are implemented (like SLAM), that often are too computationally intensive to run on simple robots. This was actually a struggle we ran into when trying to do local navigation on a yahboom r2 robot, and we were able to run this simple rl model without issue on the robot (we did run into issues with glossy floors messing with the depth camera). 
+
+With regard to parameter choices, the HAPPO framework comes with default parameters that have been shown to work in previous training iterations, though understanding if there are better hyperparameter choices for high-fidelity physics training could be interesting future research. 
+
+The reward was chosen, because in my experience, the simpler the reward, the easier to debug and evaluate the performance of the training. I did mess around with different rewards (global velocity instead of relative), but found that simply rewarding velocity along the relative forward and reverse axis performed best.
