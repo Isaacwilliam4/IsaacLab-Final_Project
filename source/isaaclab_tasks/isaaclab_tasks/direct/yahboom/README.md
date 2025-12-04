@@ -76,3 +76,37 @@ A VS Code task is provided to run the Yahboom obstacle avoidance scenario.
 3. Select **`play yahboom final velocity`**
 
 If the environment and dependencies are set up correctly, the task should launch and run without additional configuration.
+
+
+# Analysis for Final Project
+
+## Environment Setup / Training Procedure
+
+![Alt Text](./figs/training_framework.png)
+
+
+For training we utilized HAPPO with a single agent (which is just PPO), but it allows the flexibility for the addition of multiple agents later on if needed. 
+
+## Reward Function
+
+As observation the robot recieves a reduced size 40x40 depth camera.
+
+The reward function is defined in `yahboom_high_velocity.py` on line 240.
+
+```
+def _get_rewards(self) -> dict:
+    robot_vel = torch.abs(self.robots["robot_0"].data.root_lin_vel_b[:,0]) * self.step_dt
+    robot_vel = torch.nan_to_num(robot_vel, nan=0.0, posinf=1e6, neginf=-1e6)
+
+    self._episode_sums["robot_vel_reward"] += robot_vel
+    return {"robot_0": robot_vel}
+```
+
+It is simply the relative velocity of the robot in the X direction. So that it gets more reward for going faster, this encourages the robot to avoid obstacles. 
+
+## Key Diagnostics
+![Alt Text](./figs/training_results.png)
+
+## Video
+
+<iframe width="560" height="315" src="https://usu.box.com/s/cfghv7194ne74flzbe8640b8f4flyoyd" frameborder="0" allowfullscreen></iframe>
