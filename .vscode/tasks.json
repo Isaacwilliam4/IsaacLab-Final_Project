@@ -41,7 +41,7 @@
 				"Yahboom-High-Velocity-v0",
 				"--enable_cameras",
 				"--debug",
-                "--dir", "${workspaceFolder}/source/isaaclab_tasks/isaaclab_tasks/direct/yahboom/best_model"
+                "--dir", "${workspaceFolder}/source/isaaclab_tasks/isaaclab_tasks/direct/yahboom/yahboom_obstacle_avoidance/best_model"
 			],
 			"presentation": {
 				"reveal": "always",
