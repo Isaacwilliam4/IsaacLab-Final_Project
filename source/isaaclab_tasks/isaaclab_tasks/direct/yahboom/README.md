@@ -107,6 +107,8 @@ It is simply the relative velocity of the robot in the X direction. So that it g
 ## Key Diagnostics
 ![Alt Text](./figs/training_results.png)
 
+As can be seen in the results, the model succesfully learned to maximise reward until convergence. The video demonstrates more qualitative results of the robot. Some interesting insights from these metrics include the extremely small policy ratio. This means that our agent was making very small updates to the policy over time, which mean that we could have potentially increase the clipping parameter or the learning rate of the model and potentially seen faster convergence. The other interesting note is the gradually increasing value loss as the reward reaches convergence. The value loss is representative of how well the critic can understand the discounted future rewards, and it's hard to understand why that would be the case as the reward converges. One hypotheses (and a reason sometimes the robot just crashes into blocks), is that there is a bug in the physics simulation that if the robot manages to crash into a block at a certain angle, he gets launched, hence increasing its reward. But this bug is somewhat random, and so if the agent is increasing its reward by trying to exploit this bug, the critic will have a harder and harder time predicting this random process.
+
 ## Video
 
 [![Video: My Demo](https://img.youtube.com/vi/tQhDa2wzx7I/hqdefault.jpg)](https://youtu.be/tQhDa2wzx7I)
@@ -120,3 +122,5 @@ First, I use the HAPPO training environment as recent research required its inte
 With regard to parameter choices, the HAPPO framework comes with default parameters that have been shown to work in previous training iterations, though understanding if there are better hyperparameter choices for high-fidelity physics training could be interesting future research. 
 
 The reward was chosen, because in my experience, the simpler the reward, the easier to debug and evaluate the performance of the training. I did mess around with different rewards (global velocity instead of relative), but found that simply rewarding velocity along the relative forward and reverse axis performed best.
+
+Obviously high velocity doesn't make sense in a practical context, but this served as more of a baseline to show that the model could learn rudimentary obstacle avoidance with a very simple observation space. Future research will explore more practical scenarios like a go-to-goal policy. 
