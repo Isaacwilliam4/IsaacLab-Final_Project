@@ -24,6 +24,31 @@
             "windows": {
                 "command": "${workspaceFolder}/isaaclab.bat --format"
             }
-        }
+        },
+        {
+			"label": "play yahboom final velocity",
+			"type": "process",
+			"command": "${command:python.interpreterPath}",
+			"args": [
+				"${workspaceFolder}/scripts/reinforcement_learning/harl/play.py",
+				"--algorithm",
+				"happo",
+				"--num_envs",
+				"2",
+				"--num_env_steps",
+				"10_000_000_000",
+				"--task",
+				"Yahboom-High-Velocity-v0",
+				"--enable_cameras",
+				"--debug",
+                "--dir", "${workspaceFolder}/source/isaaclab_tasks/isaaclab_tasks/direct/yahboom/best_model"
+			],
+			"presentation": {
+				"reveal": "always",
+				"panel": "new",
+				"echo": true
+			},
+			"problemMatcher": []
+		}
     ]
 }
