@@ -1,6 +1,6 @@
 # Yahboom Obstacle Avoidance Task
 
-This directory is part of the repository  
+This README is part of the repository IsaacLab-Final_Project and is found at
 `IsaacLab-Final_Project/source/isaaclab_tasks/isaaclab_tasks/direct/yahboom`  
 and contains the Yahboom obstacle avoidance task built on NVIDIA Isaac Lab.
 
